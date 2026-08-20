@@ -259,7 +259,13 @@
 
   <div class="toolbar">
     <input class="search" id="searchInput" placeholder="Buscar por especie, código, sector, nombre común...">
+    <select id="utmZoneSelect" title="Zona UTM de tus coordenadas" style="padding:10px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:13px;color:var(--ink);">
+      <option value="17">Zona UTM 17S</option>
+      <option value="18" selected>Zona UTM 18S</option>
+      <option value="19">Zona UTM 19S</option>
+    </select>
     <button class="btn" id="exportBtn">⬇ Exportar CSV</button>
+    <button class="btn" id="exportKmlBtn">🌍 Exportar KML</button>
     <button class="btn btn-primary" id="newBtn">+ Nuevo registro</button>
   </div>
 
@@ -1070,6 +1076,129 @@ async function saveRecord(){
 }
 
 /* ---------- Exportar CSV ---------- */
+/* ---------- Conversión UTM (WGS84) a Latitud/Longitud, para exportar KML ---------- */
+function utmToLatLon(easting, northing, zone, isSouth){
+  const a = 6378137.0;
+  const f = 1 / 298.257223563;
+  const k0 = 0.9996;
+  const e = Math.sqrt(f * (2 - f));
+  const e2sq = (e*e) / (1 - e*e);
+
+  const x = easting - 500000.0;
+  let y = northing;
+  if(isSouth) y -= 10000000.0;
+
+  const m = y / k0;
+  const mu = m / (a * (1 - e*e/4 - 3*Math.pow(e,4)/64 - 5*Math.pow(e,6)/256));
+
+  const e1 = (1 - Math.sqrt(1 - e*e)) / (1 + Math.sqrt(1 - e*e));
+  const j1 = 3*e1/2 - 27*Math.pow(e1,3)/32;
+  const j2 = 21*Math.pow(e1,2)/16 - 55*Math.pow(e1,4)/32;
+  const j3 = 151*Math.pow(e1,3)/96;
+  const j4 = 1097*Math.pow(e1,4)/512;
+  const fp = mu + j1*Math.sin(2*mu) + j2*Math.sin(4*mu) + j3*Math.sin(6*mu) + j4*Math.sin(8*mu);
+
+  const c1 = e2sq * Math.pow(Math.cos(fp),2);
+  const t1 = Math.pow(Math.tan(fp),2);
+  const r1 = a * (1 - e*e) / Math.pow(1 - e*e*Math.pow(Math.sin(fp),2), 1.5);
+  const n1 = a / Math.sqrt(1 - e*e*Math.pow(Math.sin(fp),2));
+  const d = x / (n1*k0);
+
+  const q1 = n1 * Math.tan(fp) / r1;
+  const q2 = d*d/2;
+  const q3 = (5 + 3*t1 + 10*c1 - 4*c1*c1 - 9*e2sq) * Math.pow(d,4) / 24;
+  const q4 = (61 + 90*t1 + 298*c1 + 45*t1*t1 - 252*e2sq - 3*c1*c1) * Math.pow(d,6) / 720;
+  const lat = fp - q1 * (q2 - q3 + q4);
+
+  const q6 = (1 + 2*t1 + c1) * Math.pow(d,3) / 6;
+  const q7 = (5 - 2*c1 + 28*t1 - 3*c1*c1 + 8*e2sq + 24*t1*t1) * Math.pow(d,5) / 120;
+  const lon = (d - q6 + q7) / Math.cos(fp);
+
+  const lonOrigin = (zone - 1)*6 - 180 + 3;
+  const longitude = lonOrigin + lon * 180/Math.PI;
+  const latitude = lat * 180/Math.PI;
+
+  if(isNaN(latitude) || isNaN(longitude)) return null;
+  return { lat: latitude, lon: longitude };
+}
+
+function kmlPlacemark(nombre, descripcion, lat, lon, colorEstilo){
+  return `<Placemark>
+    <name>${xmlEsc(nombre)}</name>
+    <description><![CDATA[${descripcion}]]></description>
+    <styleUrl>#${colorEstilo}</styleUrl>
+    <Point><coordinates>${lon.toFixed(7)},${lat.toFixed(7)},0</coordinates></Point>
+  </Placemark>`;
+}
+
+function xmlEsc(v){
+  return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function exportKML(){
+  if(records.length === 0){ toast('No hay registros para exportar', true); return; }
+  const zone = parseInt(document.getElementById('utmZoneSelect').value, 10);
+  let rescatePlacemarks = '';
+  let reubPlacemarks = '';
+  let omitidos = 0;
+
+  records.forEach(r=>{
+    const nombre = r.codificacion || `Ítem ${r.item}` || r.especie || 'Registro';
+    const desc = `Especie: ${xmlEsc(r.especie)}<br>Componente: ${xmlEsc(r.componente)} ${xmlEsc(r.codigoComponente)}<br>Sector: ${xmlEsc(r.poligonoSector)}<br>Decisión: ${xmlEsc(r.decision)}<br>Fecha de rescate: ${xmlEsc(r.fechaRescate)}`;
+
+    const esteR = parseFloat(r.coordEsteRescate);
+    const norteR = parseFloat(r.coordNorteRescate);
+    if(!isNaN(esteR) && !isNaN(norteR)){
+      const p = utmToLatLon(esteR, norteR, zone, true);
+      if(p) rescatePlacemarks += kmlPlacemark(nombre + ' (rescate)', desc, p.lat, p.lon, 'estiloRescate');
+      else omitidos++;
+    }
+
+    const esteU = parseFloat(r.coordEsteReub);
+    const norteU = parseFloat(r.coordNorteReub);
+    if(!isNaN(esteU) && !isNaN(norteU)){
+      const p = utmToLatLon(esteU, norteU, zone, true);
+      if(p) reubPlacemarks += kmlPlacemark(nombre + ' (reubicación)', desc, p.lat, p.lon, 'estiloReubicacion');
+      else omitidos++;
+    }
+  });
+
+  if(!rescatePlacemarks && !reubPlacemarks){
+    toast('Ningún registro tiene coordenadas UTM válidas', true);
+    return;
+  }
+
+  const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>Registro de Rescate de Flora</name>
+  <Style id="estiloRescate">
+    <IconStyle><color>ff2f8b2f</color><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/grn-circle.png</href></Icon></IconStyle>
+  </Style>
+  <Style id="estiloReubicacion">
+    <IconStyle><color>ffaa5a3e</color><scale>1.1</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/blu-circle.png</href></Icon></IconStyle>
+  </Style>
+  <Folder><name>Puntos de rescate</name>
+    ${rescatePlacemarks}
+  </Folder>
+  <Folder><name>Puntos de reubicación</name>
+    ${reubPlacemarks}
+  </Folder>
+</Document>
+</kml>`;
+
+  const blob = new Blob([kml], {type:'application/vnd.google-earth.kml+xml'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'registro_rescate_flora.kml';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  if(omitidos > 0){
+    toast(`KML exportado. ${omitidos} coordenada(s) no se pudieron convertir.`);
+  }
+}
+
 function exportCSV(){
   if(records.length === 0){ toast('No hay registros para exportar', true); return; }
   const headers = ['ITEM','CODIFICACION','FECHA DE RESCATE','FECHA DE REUBICACION','COMPONENTE','CODIGO DE COMPONENTE','POLIGONO/SECTOR','PREVIO AL MOVIMIENTO DE TIERRAS','ESPECIE','Familia','D.S.043','CITES','IUCN','PRIORIDAD','NOMBRE COMUN','FORMA DE CRECIMIENTO',
@@ -1124,6 +1253,7 @@ document.getElementById('closeModal').addEventListener('click', closeModalFn);
 document.getElementById('cancelBtn').addEventListener('click', closeModalFn);
 document.getElementById('saveBtn').addEventListener('click', saveRecord);
 document.getElementById('exportBtn').addEventListener('click', exportCSV);
+document.getElementById('exportKmlBtn').addEventListener('click', exportKML);
 document.getElementById('searchInput').addEventListener('input', render);
 document.getElementById('overlay').addEventListener('click', (e)=>{ if(e.target.id==='overlay') closeModalFn(); });
 document.getElementById('f_especieSelect').addEventListener('change', (e)=>{
